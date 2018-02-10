@@ -7,18 +7,17 @@
  * 	Licensing Info: Located at https://raw.githubusercontent.com/tonesto7/nest-manager/master/LICENSE.md
  */
 
-// TODO: Need to update Copyright
-
 import java.text.SimpleDateFormat
 
 preferences {  }
 
-def devVer() { return "4.4.0" }
+def devVer() { return "5.3.1" }
 
 // for the UI
 metadata {
 	definition (name: "${textDevName()}", namespace: "tonesto7", author: "DesertBlade") {
 
+		capability "Actuator"
 		capability "Presence Sensor"
 		capability "Sensor"
 		capability "Refresh"
@@ -30,6 +29,7 @@ metadata {
 		command "setHome"
 		command "setAway"
 
+		attribute "devVer", "string"
 		attribute "lastConnection", "string"
 		attribute "apiStatus", "string"
 		attribute "debugOn", "string"
@@ -44,8 +44,8 @@ metadata {
 
 	tiles(scale: 2) {
 		standardTile("presence", "device.presence", width: 4, height: 4, canChangeBackground: true) {
-			state("present", 	labelIcon:"st.presence.tile.mobile-present", 	backgroundColor:"#53a7c0", icon:"https://raw.githubusercontent.com/tonesto7/nest-manager/master/Images/Devices/nest_dev_pres_icon.png")
-			state("not present",labelIcon:"st.presence.tile.mobile-not-present",backgroundColor:"#ebeef2", icon:"https://raw.githubusercontent.com/tonesto7/nest-manager/master/Images/Devices/nest_dev_away_icon.png")
+			state("present", 	labelIcon:"st.presence.tile.mobile-present", 	backgroundColor:"#00a0dc", icon:"https://raw.githubusercontent.com/tonesto7/nest-manager/master/Images/Devices/nest_dev_pres_icon.png")
+			state("not present",labelIcon:"st.presence.tile.mobile-not-present",backgroundColor:"#cccccc", icon:"https://raw.githubusercontent.com/tonesto7/nest-manager/master/Images/Devices/nest_dev_away_icon.png")
 		}
 		standardTile("nestPresence", "device.nestPresence", width:2, height:2, decoration: "flat") {
 			state "home",	action: "setPresence",	icon: "https://raw.githubusercontent.com/tonesto7/nest-manager/master/Images/Devices/pres_home_icon.png"
@@ -63,10 +63,10 @@ metadata {
 		standardTile("refresh", "device.refresh", width:2, height:2, decoration: "flat") {
 			state "default", action:"refresh.refresh", icon:"https://raw.githubusercontent.com/tonesto7/nest-manager/master/Images/Devices/refresh_icon.png"
 		}
-		valueTile("devTypeVer", "device.devTypeVer",  width: 2, height: 1, decoration: "flat") {
+		valueTile("devTypeVer", "device.devTypeVer", width: 2, height: 1, decoration: "flat") {
 			state("default", label: 'Device Type:\nv${currentValue}')
 		}
-        htmlTile(name:"html", action: "getHtml", width: 6, height: 4, whitelist: ["raw.githubusercontent.com", "cdn.rawgit.com"])
+		htmlTile(name:"html", action: "getHtml", width: 6, height: 4, whitelist: ["raw.githubusercontent.com", "cdn.rawgit.com"])
 
 		main ("presence")
 		details ("presence", "nestPresence", "refresh", "html")
@@ -79,25 +79,86 @@ mappings {
 
 void installed() {
 	Logger("installed...")
-	verifyHC()
+	initialize()
+	state?.isInstalled = true
+}
+
+def initialize() {
+	LogAction("initialized...")
+	state?.healthInRepair = false
+	if (!state.updatedLastRanAt || now() >= state.updatedLastRanAt + 2000) {
+		state.updatedLastRanAt = now()
+		verifyHC()
+	} else {
+		log.trace "initialize(): Ran within last 2 seconds - SKIPPING"
+	}
+}
+
+void updated() {
+	Logger("updated...")
+	initialize()
+}
+
+def useTrackedHealth() { return state?.useTrackedHealth ?: false }
+
+def getHcTimeout() {
+	def to = state?.hcTimeout
+	return ((to instanceof Integer) ? to.toInteger() : 60)*60
 }
 
 void verifyHC() {
-	def val = device.currentValue("checkInterval")
-	def timeOut = state?.hcTimeout ?: 60
-	if(!val || val.toInteger() != (timeOut.toInteger() * 60)) {
-		Logger("verifyHC: Updating Device Health Check Interval to $timeOut")
-		sendEvent(name: "checkInterval", value: 60 * timeOut.toInteger(), data: [protocol: "cloud"], displayed: false)
+	if(useTrackedHealth()) {
+		def timeOut = getHcTimeout()
+		if(!val || val.toInteger() != timeOut) {
+			Logger("verifyHC: Updating Device Health Check Interval to $timeOut")
+			sendEvent(name: "checkInterval", value: timeOut, data: [protocol: "cloud"], displayed: false)
+		}
+	} else {
+		sendEvent(name: "DeviceWatch-Enroll", value: groovy.json.JsonOutput.toJson(["protocol":"cloud", "scheme":"untracked"]), displayed: false)
+	}
+	repairHealthStatus(null)
+}
+
+def modifyDeviceStatus(status) {
+	if(status == null) { return }
+	def val = status.toString() == "offline" ? "offline" : "online"
+	if(val != getHealthStatus(true)) {
+		sendEvent(name: "DeviceWatch-DeviceStatus", value: val.toString(), displayed: false, isStateChange: true)
+		Logger("UPDATED: DeviceStatus Event: '$val'")
 	}
 }
 
 def ping() {
 	Logger("ping...")
-	refresh()
+//	if(useTrackedHealth()) {
+		keepAwakeEvent()
+//	}
 }
 
-def initialize() {
-	LogAction("initialize")
+def keepAwakeEvent() {
+	def lastDt = state?.lastUpdatedDtFmt
+	if(lastDt) {
+		def ldtSec = getTimeDiffSeconds(lastDt)
+		//log.debug "ldtSec: $ldtSec"
+		if(ldtSec < 3600) {
+			LogAction("keepAwakeEvent: ldtSec: $ldtSec", "debug", true)
+			poll()
+		}
+	}
+}
+
+void repairHealthStatus(data) {
+	Logger("repairHealthStatus($data)")
+	if(state?.hcRepairEnabled != false) {
+		if(data?.flag) {
+			sendEvent(name: "DeviceWatch-DeviceStatus", value: "online", displayed: false, isStateChange: true)
+			state?.healthInRepair = false
+		} else {
+			state.healthInRepair = true
+			sendEvent(name: "DeviceWatch-DeviceStatus", value: "offline", displayed: false, isStateChange: true)
+			runIn(7, repairHealthStatus, [data: [flag: true]])
+		}
+	}
 }
 
 def parse(String description) {
@@ -111,7 +172,7 @@ def poll() {
 	parent.refresh(this)
 }
 
-def refresh() {
+void refresh() {
 	poll()
 }
 
@@ -126,7 +187,7 @@ def generateEvent(Map eventData) {
 
 def processEvent(data) {
 	if(state?.swVersion != devVer()) {
-		installed()
+		initialize()
 		state.swVersion = devVer()
 	}
 	def eventData = data?.evt
@@ -135,12 +196,17 @@ def processEvent(data) {
 	try {
 		LogAction("------------START OF API RESULTS DATA------------", "warn")
 		if(eventData) {
+			state.isBeta = eventData?.isBeta == true ? true : false
+			state.hcRepairEnabled = eventData?.hcRepairEnabled == true ? true : false
 			state.showLogNamePrefix = eventData?.logPrefix == true ? true : false
 			state.enRemDiagLogging = eventData?.enRemDiagLogging == true ? true : false
-			if(eventData.hcTimeout && state?.hcTimeout != eventData?.hcTimeout) {
-				state.hcTimeout = eventData?.hcTimeout
-				verifyHC()
-			}
+			state.healthMsg = eventData?.healthNotify == true ? true : false
+//			if(useTrackedHealth()) {
+				if(eventData.hcTimeout && (state?.hcTimeout != eventData?.hcTimeout || !state?.hcTimeout)) {
+					state.hcTimeout = eventData?.hcTimeout
+					verifyHC()
+				}
+//			}
 			state.nestTimeZone = eventData?.tz ?: null
 			state.clientBl = eventData?.clientBl == true ? true : false
 			state.mobileClientType = eventData?.mobileClientType
@@ -150,7 +216,20 @@ def processEvent(data) {
 			apiStatusEvent((!eventData?.apiIssues ? false : true))
 			deviceVerEvent(eventData?.latestVer.toString())
 			if(eventData?.allowDbException) { state?.allowDbException = eventData?.allowDbException = false ? false : true }
-			lastUpdatedEvent()
+			lastUpdatedEvent(true)
+
+			if(eventData?.lastStrucDataUpd) {
+				def newDt = formatDt(Date.parse("E MMM dd HH:mm:ss z yyyy", eventData?.lastStrucDataUpd?.toString()))
+				//log.debug "newDt: $newDt"
+				def curDt = Date.parse("E MMM dd HH:mm:ss z yyyy", getDtNow())
+				def lastDt = Date.parse("E MMM dd HH:mm:ss z yyyy", newDt?.toString())
+				if((lastDt + 14*60*1000) < curDt) {
+					modifyDeviceStatus("offline")
+				} else {
+					modifyDeviceStatus("online")
+				}
+			}
+			checkHealth()
 		}
 		//This will return all of the devices state data to the logs.
 		//log.debug "Device State Data: ${getState()}"
@@ -165,6 +244,8 @@ def processEvent(data) {
 def getDataByName(String name) {
 	state[name] ?: device.getDataValue(name)
 }
+
+def getDevTypeId() { return device?.getTypeId() }
 
 def getDeviceStateData() {
 	return getState()
@@ -208,7 +289,10 @@ def deviceVerEvent(ver) {
 	def newData = isCodeUpdateAvailable(pubVer, dVer) ? "${dVer}(New: v${pubVer})" : "${dVer}" as String
 	state?.devTypeVer = newData
 	state?.updateAvailable = isCodeUpdateAvailable(pubVer, dVer)
-	if(!curData?.equals(newData)) {
+	if(isStateChange(device, "devVer", dVer.toString())) {
+		sendEvent(name: 'devVer', value: dVer, displayed: false)
+	}
+	if(isStateChange(device, "devTypeVer", newData.toString())) {
 		Logger("UPDATED | Device Type Version is: (${newData}) | Original State: (${curData})")
 		sendEvent(name: 'devTypeVer', value: newData, displayed: false)
 	} else { LogAction("Device Type Version is: (${newData}) | Original State: (${curData})") }
@@ -218,23 +302,23 @@ def debugOnEvent(debug) {
 	def val = device.currentState("debugOn")?.value
 	def stateVal = debug ? "On" : "Off"
 	state.debug = debug ? true : false
-	if(!val.equals(stateVal)) {
-		log.debug("UPDATED | debugOn: (${stateVal}) | Original State: (${val})")
+	if(isStateChange(device, "debugOn", stateVal.toString())) {
+		log.debug("UPDATED | Device Debug Logging is: (${stateVal}) | Original State: (${val})")
 		sendEvent(name: 'debugOn', value: stateVal, displayed: false)
-	} else { LogAction("debugOn: (${stateVal}) | Original State: (${val})") }
+	} else { LogAction("Device Debug Logging is: (${stateVal}) | Original State: (${val})") }
 }
 
-def lastUpdatedEvent() {
+def lastUpdatedEvent(sendEvt=false) {
 	def now = new Date()
-	def formatVal = state?.useMilitaryTime ? "MMM d, yyyy - HH:mm:ss" : "MMM d, yyyy - h:mm:ss a"
+	def formatVal = state.useMilitaryTime ? "MMM d, yyyy - HH:mm:ss" : "MMM d, yyyy - h:mm:ss a"
 	def tf = new SimpleDateFormat(formatVal)
 	tf.setTimeZone(getTimeZone())
 	def lastDt = "${tf?.format(now)}"
-	def lastUpd = device.currentState("lastUpdatedDt")?.value
 	state?.lastUpdatedDt = lastDt?.toString()
-	if(!lastUpd.equals(lastDt?.toString())) {
-		Logger("Last Parent Refresh time: (${lastDt}) | Previous Time: (${lastUpd})")
-		sendEvent(name: 'lastUpdatedDt', value: lastDt?.toString(), displayed: false, isStateChange: true)
+	state?.lastUpdatedDtFmt = getDtNow()
+	if(sendEvt) {
+		LogAction("Last Parent Refresh time: (${lastDt}) | Previous Time: (${lastUpd})")
+		sendEvent(name: 'lastUpdatedDt', value: getDtNow()?.toString(), displayed: false, isStateChange: true)
 	}
 }
 
@@ -246,7 +330,7 @@ def presenceEvent(presence) {
 	def statePres = state?.present
 	state?.present = (pres == "present") ? true : false
 	state?.nestPresence = newNestPres
-	if(!val.equals(pres) || !nestPres.equals(newNestPres) || !nestPres) {
+	if(isStateChange(device, "presence", pres.toString()) || isStateChange(device, "nestPresence", newNestPres.toString()) || !nestPres) {
 		Logger("UPDATED | Presence: ${pres} | Original State: ${val} | State Variable: ${statePres}")
 		sendEvent(name: 'nestPresence', value: newNestPres, descriptionText: "Nest Presence is: ${newNestPres}", displayed: true, isStateChange: true )
 		sendEvent(name: 'presence', value: pres, descriptionText: "Device is: ${pres}", displayed: true, isStateChange: true )
@@ -257,7 +341,7 @@ def apiStatusEvent(issue) {
 	def curStat = device.currentState("apiStatus")?.value
 	def newStat = issue ? "issue" : "ok"
 	state?.apiStatus = newStat
-	if(!curStat.equals(newStat)) {
+	if(isStateChange(device, "apiStatus", newStat.toString())) {
 		Logger("UPDATED | API Status is: (${newStat}) | Original State: (${curStat})")
 		sendEvent(name: "apiStatus", value: newStat, descriptionText: "API Status is: ${newStat}", displayed: true, isStateChange: true, state: newStat)
 	} else { LogAction("API Status is: (${newStat}) | Original State: (${curStat})") }
@@ -269,6 +353,33 @@ def getNestPresence() {
 
 def getPresence() {
 	return !device.currentState("presence") ? "present" : device.currentState("presence").value.toString()
+}
+
+def getHealthStatus(lower=false) {
+	def res = device?.getStatus()
+	if(lower) { return res.toString().toLowerCase() }
+	return res.toString()
+}
+
+def healthNotifyOk() {
+	def lastDt = state?.lastHealthNotifyDt
+	if(lastDt) {
+		def ldtSec = getTimeDiffSeconds(lastDt)
+		if(ldtSec < 600) {
+			return false
+		}
+	}
+	return true
+}
+
+def checkHealth() {
+	def isOnline = (getHealthStatus() == "ONLINE") ? true : false
+	if(isOnline || state?.healthMsg != true || state?.healthInRepair == true) { return }
+	if(healthNotifyOk()) {
+		def now = new Date()
+		parent?.deviceHealthNotify(this, isOnline)
+		state.lastHealthNotifyDt = getDtNow()
+	}
 }
 
 /************************************************************************************************
@@ -288,7 +399,7 @@ void setPresence() {
 	}
 }
 
-def setAway() {
+void setAway() {
 	try {
 		log.trace "setAway()..."
 		parent.setStructureAway(this, "true")
@@ -300,7 +411,7 @@ def setAway() {
 	}
 }
 
-def setHome() {
+void setHome() {
 	try {
 		log.trace "setHome()..."
 		parent.setStructureAway(this, "false")
@@ -317,34 +428,35 @@ def setHome() {
 *************************************************************************************************/
 void Logger(msg, logType = "debug") {
 	def smsg = state?.showLogNamePrefix ? "${device.displayName}: ${msg}" : "${msg}"
-	switch (logType) {
-		case "trace":
-			log.trace "${smsg}"
-			break
-		case "debug":
-			log.debug "${smsg}"
-			break
-		case "info":
-			log.info "${smsg}"
-			break
-		case "warn":
-			log.warn "${smsg}"
-			break
-		case "error":
-			log.error "${smsg}"
-			break
-		default:
-			log.debug "${smsg}"
-			break
-	}
 	if(state?.enRemDiagLogging) {
-		parent.saveLogtoRemDiagStore(smsg, logType, "Presence DTH")
+		parent.saveLogtoRemDiagStore(smsg, logType, "Presence")
+	} else {
+		switch (logType) {
+			case "trace":
+				log.trace "${smsg}"
+				break
+			case "debug":
+				log.debug "${smsg}"
+				break
+			case "info":
+				log.info "${smsg}"
+				break
+			case "warn":
+				log.warn "${smsg}"
+				break
+			case "error":
+				log.error "${smsg}"
+				break
+			default:
+				log.debug "${smsg}"
+				break
+		}
 	}
 }
 
 // Local Application Logging
-void LogAction(msg, logType = "debug") {
-	if(state?.debug) {
+void LogAction(msg, logType = "debug", frc=false) {
+	if(state?.debug || frc) {
 		Logger(msg, logType)
 	}
 }
@@ -372,24 +484,37 @@ def getMetricCntData() {
 	return [presHtmlLoadCnt:(state?.htmlLoadCnt ?: 0)]
 }
 
-def getImgBase64(url,type) {
-	def params = [
-		uri: url,
-		contentType: 'image/$type'
-	]
-	httpGet(params) { resp ->
-		if(resp.data) {
-			def respData = resp?.data
-			ByteArrayOutputStream bos = new ByteArrayOutputStream()
-			int len
-			int size = 3072
-			byte[] buf = new byte[size]
-			while ((len = respData.read(buf, 0, size)) != -1)
-				bos.write(buf, 0, len)
-			buf = bos.toByteArray()
-			String s = buf?.encodeBase64()
-			return s ? "data:image/${type};base64,${s.toString()}" : null
-		}
+def getDtNow() {
+	def now = new Date()
+	return formatDt(now)
+}
+
+def formatDt(dt) {
+	def tf = new SimpleDateFormat("E MMM dd HH:mm:ss z yyyy")
+	if(getTimeZone()) { tf.setTimeZone(getTimeZone()) }
+	else {
+		Logger("SmartThings TimeZone is not found or is not set... Please Try to open your ST location and Press Save...", "warn")
+	}
+	return tf.format(dt)
+}
+
+def getTimeDiffSeconds(strtDate, stpDate=null, methName=null) {
+	//LogTrace("[GetTimeDiffSeconds] StartDate: $strtDate | StopDate: ${stpDate ?: "Not Sent"} | MethodName: ${methName ?: "Not Sent"})")
+	try {
+		if(strtDate) {
+			//if(strtDate?.contains("dtNow")) { return 10000 }
+			def now = new Date()
+			def stopVal = stpDate ? stpDate.toString() : getDtNow()
+			def startDt = Date.parse("E MMM dd HH:mm:ss z yyyy", strtDate)
+			def stopDt = Date.parse("E MMM dd HH:mm:ss z yyyy", stopVal)
+			def start = Date.parse("E MMM dd HH:mm:ss z yyyy", formatDt(startDt)).getTime()
+			def stop = Date.parse("E MMM dd HH:mm:ss z yyyy", stopVal).getTime()
+			def diff = (int) (long) (stop - start) / 1000
+			//LogTrace("[GetTimeDiffSeconds] Results for '$methName': ($diff seconds)")
+			return diff
+		} else { return null }
+	} catch (ex) {
+		log.warn "getTimeDiffSeconds error: Unable to parse datetime..."
 	}
 }
 
@@ -420,35 +545,22 @@ def getCssData() {
 	def cssData = null
 	def htmlInfo = state?.htmlInfo
 	if(htmlInfo?.cssUrl && htmlInfo?.cssVer) {
-		if(state?.cssData) {
-			if (state?.cssVer?.toInteger() == htmlInfo?.cssVer?.toInteger()) {
-				//LogAction("getCssData: CSS Data is Current | Loading Data from State...")
-				cssData = state?.cssData
-			} else if (state?.cssVer?.toInteger() < htmlInfo?.cssVer?.toInteger()) {
-				//LogAction("getCssData: CSS Data is Outdated | Loading Data from Source...")
-				cssData = getFileBase64(htmlInfo.cssUrl, "text", "css")
-				state.cssData = cssData
-				state?.cssVer = htmlInfo?.cssVer
-			}
-		} else {
-			//LogAction("getCssData: CSS Data is Missing | Loading Data from Source...")
-			cssData = getFileBase64(htmlInfo.cssUrl, "text", "css")
-			state?.cssData = cssData
-			state?.cssVer = htmlInfo?.cssVer
-		}
+		cssData = getFileBase64(htmlInfo.cssUrl, "text", "css")
+		state?.cssVer = htmlInfo?.cssVer
 	} else {
-		//LogAction("getCssData: No Stored CSS Data Found for Device... Loading for Static URL...")
 		cssData = getFileBase64(cssUrl(), "text", "css")
 	}
 	return cssData
 }
 
-def cssUrl() { return "https://raw.githubusercontent.com/desertblade/ST-HTMLTile-Framework/master/css/smartthings.css" }
+def cssUrl() { return "https://raw.githubusercontent.com/tonesto7/nest-manager/master/Documents/css/ST-HTML.min.css" }
+
+def hasHtml() { return false }
 
 def getHtml() {
 	try {
-		def updateAvail = !state.updateAvailable ? "" : "<h3>Device Update Available!</h3>"
-		def clientBl = state?.clientBl ? """<h3>Your Manager client has been blacklisted!\nPlease contact the Nest Manager developer to get the issue resolved!!!</h3>""" : ""
+		def updateAvail = !state.updateAvailable ? "" : """<div class="greenAlertBanner">Device Update Available!</div>"""
+		def clientBl = state?.clientBl ? """<div class="brightRedAlertBanner">Your Manager client has been blacklisted!\nPlease contact the Nest Manager developer to get the issue resolved!!!</div>""" : ""
 
 		def mainHtml = """
 		<!DOCTYPE html>
